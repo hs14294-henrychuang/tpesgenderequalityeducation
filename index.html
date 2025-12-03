@@ -16,9 +16,9 @@
 
     <!-- 
       UPDATES:
-      1. Level 4: Voice Recognition implemented using Web Speech API.
-      2. Level 4: Expanded Trust Circle options (more negative options).
-      3. Home: Added API Key input field for deployment configuration.
+      1. Fixed 'playAudioNarrator' to use real SpeechSynthesis API.
+      2. Added text filtering to ensure only Chinese text/punctuation is read (ignoring emojis).
+      3. Optimized voice selection for zh-TW.
     -->
 
     <style>
@@ -135,7 +135,7 @@
             <div class="mt-8 p-4 bg-gray-50 rounded-lg border border-gray-200 text-sm w-full max-w-xs">
                 <label for="api-key" class="block text-gray-500 mb-1 text-left font-bold">⚙️ 教師/開發者設定 (API Key)</label>
                 <input type="password" id="api-key" placeholder="輸入 API Key (選填)" class="w-full p-2 border border-gray-300 rounded focus:outline-none focus:border-amber-500" onchange="saveApiKey(this.value)">
-                <p class="text-xs text-gray-400 mt-1 text-left">*用於擴充 AI 功能。本機語音辨識無需填寫。</p>
+                <p class="text-xs text-gray-400 mt-1 text-left">*用於擴充 AI 功能。本機語音辨識无需填寫。</p>
             </div>
         </div>
 
@@ -236,7 +236,7 @@
                             小松鼠在公園快樂地玩耍...
                         </p>
                         
-                        <button onclick="playAudioNarrator()" class="flex items-center gap-2 text-indigo-500 bg-indigo-50 px-4 py-2 rounded-full text-base hover:bg-indigo-100 mb-6">
+                        <button id="story-listen-btn" onclick="playAudioNarrator()" class="flex items-center gap-2 text-indigo-500 bg-indigo-50 px-4 py-2 rounded-full text-base hover:bg-indigo-100 mb-6">
                             <span>🔊</span> 聽聽故事
                         </button>
 
@@ -374,7 +374,22 @@
         function saveApiKey(key) {
             apiKey = key;
             console.log("API Key saved:", key ? "****" : "None");
-            // In a real app, save to localStorage or use immediately
+        }
+
+        // --- Voice Synthesis Setup (TTS) ---
+        let synthesisVoice = null;
+
+        function initVoices() {
+            const voices = window.speechSynthesis.getVoices();
+            // Prioritize Traditional Chinese (TW), then generic Chinese
+            synthesisVoice = voices.find(v => v.lang.includes('zh-TW')) || 
+                             voices.find(v => v.lang.includes('zh')) || 
+                             null;
+        }
+
+        // Chrome loads voices asynchronously
+        if ('speechSynthesis' in window) {
+            window.speechSynthesis.onvoiceschanged = initVoices;
         }
 
         // Init
@@ -384,6 +399,10 @@
             setupRadarGame();
             setupStory();
             setupCourageChart();
+            // Try init voices early
+            if ('speechSynthesis' in window) {
+                initVoices();
+            }
         });
 
         // Navigation
@@ -399,6 +418,11 @@
             
             if(level === 1) resizeCanvas();
             if(level === 2) loadNextCard();
+            
+            // Cancel any playing speech when changing levels
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel();
+            }
         }
 
         function updateProgressDots() {
@@ -563,6 +587,11 @@
             document.getElementById('story-visual-main').innerText = scene.main;
             document.getElementById('story-visual-sub').innerText = scene.sub;
             document.getElementById('story-progress').style.width = scene.progress;
+            
+            // Reset audio button
+             const audioBtn = document.getElementById('story-listen-btn');
+             audioBtn.innerHTML = "<span>🔊</span> 聽聽故事";
+             audioBtn.classList.remove('bg-indigo-200');
 
             const nextBtn = document.getElementById('story-next-btn');
             const choicesContainer = document.getElementById('story-choices');
@@ -619,11 +648,65 @@
         }
 
         function playAudioNarrator() {
-            const btn = document.querySelector('#story-scene button');
-            const originalText = btn.innerHTML;
-            btn.innerHTML = "🔊 播放中...";
+            if (!('speechSynthesis' in window)) {
+                alert("您的瀏覽器不支援語音朗讀功能喔！");
+                return;
+            }
+
+            // Cancel any current speech
+            window.speechSynthesis.cancel();
+
+            // Get text and filter for Chinese only (remove emojis, keep CJK, numbers, standard punctuation)
+            const rawText = storyScenes[storyIndex].text;
+            
+            // Regex explanation:
+            // \u4e00-\u9fa5 : Common CJK characters
+            // \uff0c\u3002\uff1f\uff01\uff1a\uff1b\u201c\u201d\u300e\u300f\uff08\uff09 : Full-width punctuation
+            // 0-9 : Numbers
+            // [^\u4e00-\u9fa5\uff0c\u3002\uff1f\uff01\uff1a\uff1b\u201c\u201d\u300e\u300f\uff08\uff090-9] -> Match anything NOT these
+            
+            // A simpler, robust way to allow only "readable" characters for Chinese context:
+            // We just strip out Emojis or specifically match what we want. 
+            // Let's filter to keep CJK, ASCII (for simple numbers/punctuation), and Full-width punctuation.
+            
+            // This regex matches things we WANT to READ.
+            // But verify: we want to IGNORE emojis which might be in the string (though currently data is clean).
+            // Just to be safe per user request "ensure only read Chinese parts".
+            
+            // NOTE: The story text in 'storyScenes' currently does NOT contain emojis inside the 'text' property.
+            // But to be strictly compliant if future edits add them:
+            const cleanText = rawText.replace(/[^\u4e00-\u9fa50-9\uff0c\u3002\uff1f\uff01\uff1a\uff1b\u201c\u201d\u300e\u300f\u3001]/g, '');
+
+            const utterance = new SpeechSynthesisUtterance(cleanText);
+
+            // Set Voice
+            if (!synthesisVoice) initVoices();
+            if (synthesisVoice) utterance.voice = synthesisVoice;
+
+            // Settings for kids
+            utterance.lang = 'zh-TW';
+            utterance.rate = 0.9; // Slower
+            utterance.pitch = 1.1; // Friendlier
+
+            // UI Feedback
+            const btn = document.getElementById('story-listen-btn');
+            const originalHTML = btn.innerHTML;
+            
+            btn.innerHTML = "<span>🔊</span> 正在朗讀...";
             btn.classList.add('bg-indigo-200');
-            setTimeout(() => { btn.innerHTML = originalText; btn.classList.remove('bg-indigo-200'); }, 2000);
+
+            utterance.onend = () => {
+                btn.innerHTML = originalHTML;
+                btn.classList.remove('bg-indigo-200');
+            };
+
+            utterance.onerror = (e) => {
+                console.error("Speech error:", e);
+                btn.innerHTML = originalHTML;
+                btn.classList.remove('bg-indigo-200');
+            };
+
+            window.speechSynthesis.speak(utterance);
         }
 
         function setupStory() { renderStory(); }
